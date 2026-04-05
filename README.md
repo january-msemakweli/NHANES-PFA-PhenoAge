@@ -1,5 +1,7 @@
 # Renal Clearance and Albumin Binding May Distort Cross-Sectional Associations Between PFAS and Phenotypic Age Acceleration
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19431451.svg)](https://doi.org/10.5281/zenodo.19431451)
+
 Reproducible R code and data-extraction pipeline for the analysis of per- and polyfluoroalkyl substance (PFAS) mixtures and Phenotypic Age (PhenoAge) acceleration using NHANES 2005--2018, with a focus on toxicokinetic--algorithm entanglement mediated by chronic kidney disease (CKD) and serum albumin.
 
 ## Overview
