@@ -1,34 +1,44 @@
 library(ggplot2)
 library(grid)
 
-# ---- Main vertical boxes ----
-boxes <- data.frame(
-  xmin = c(0, 0, 0, 0, 0),
-  xmax = c(6, 6, 6, 6, 6),
-  ymin = c(10, 7, 4, 1, -2),
-  ymax = c(12, 9, 6, 3, 0),
-  label = c(
-    "Downloaded NHANES Participants\n(N = 80,312)",
-    "Adults Age ≥ 20\n(N = 44,790)",
-    "Non-missing PhenoAge, CKD,\nSurvey Weights\n(N = 23,387)",
-    "Primary PFAS Complete-Case\n(N = 4,696)",
-    "Final Analytic Sample\nModels A & B\n(N = 1,994)"
-  )
+# ---- Main vertical boxes (simplified to key analytic steps) ----
+main_labels <- c(
+  "Downloaded NHANES Participants\n(Selected Cycles)\n(N = 80,312)",
+  "Age >= 20\n(N = 44,790)",
+  "Non-missing PhenoAge, CKD,\nand Required Modeling Components\n(N = 23,387)",
+  "Non-missing Selected Weight,\nPSU, and Strata (Analytic Sample)\n(N = 15,239)",
+  "Complete-Case Modeling Sample\n(qgcomp-Compatible PFAS Subset)\n(N = 3,058)",
+  "Model B Complete-Case\nEstimation Sample\n(N = 3,058)"
 )
+
+exclusion_labels <- c(
+  "Excluded: Age < 20\n(N = 35,522)",
+  "Excluded: Missing PhenoAge, CKD,\nor Required Modeling Components\n(N = 21,403)",
+  "Excluded: Missing Weight/PSU/Strata\n(N = 8,148)",
+  "Excluded:\nNot in Complete-Case\nModeling Sample\n(N = 12,181)",
+  "Excluded: Not in Model B Estimation\n(N = 0)"
+)
+
+top_y <- 20
+step_gap <- 3
+box_height <- 2
+
+boxes <- data.frame(
+  xmin = 0,
+  xmax = 6,
+  ymax = top_y - (seq_along(main_labels) - 1) * step_gap,
+  label = main_labels
+)
+boxes$ymin <- boxes$ymax - box_height
 
 # ---- Exclusion boxes ----
 exclusions <- data.frame(
-  xmin = c(9, 9, 9, 9),
-  xmax = c(15, 15, 15, 15),
-  ymin = c(10, 7, 4, 1),
-  ymax = c(12, 9, 6, 3),
-  label = c(
-    "Excluded: Age < 20\n(N = 35,522)",
-    "Excluded: Missing PhenoAge or CKD\n(N = 21,403)",
-    "Excluded: Missing Primary PFAS\n(N = 18,691)",
-    "Excluded: Missing Covariates\n(N = 2,702)"
-  )
+  xmin = 9,
+  xmax = 15,
+  ymax = boxes$ymax[seq_along(exclusion_labels)],
+  label = exclusion_labels
 )
+exclusions$ymin <- exclusions$ymax - box_height
 
 p <- ggplot() +
   
@@ -45,36 +55,35 @@ p <- ggplot() +
             fill = "white", color = "black", linewidth = 1) +
   
   # Vertical arrows
-  geom_segment(aes(x = 3, xend = 3, y = 10, yend = 9),
-               arrow = arrow(length = unit(0.25, "cm"))) +
-  geom_segment(aes(x = 3, xend = 3, y = 7, yend = 6),
-               arrow = arrow(length = unit(0.25, "cm"))) +
-  geom_segment(aes(x = 3, xend = 3, y = 4, yend = 3),
-               arrow = arrow(length = unit(0.25, "cm"))) +
-  geom_segment(aes(x = 3, xend = 3, y = 1, yend = 0),
-               arrow = arrow(length = unit(0.25, "cm"))) +
+  geom_segment(
+    data = data.frame(
+      x = 3, xend = 3,
+      y = boxes$ymin[-nrow(boxes)],
+      yend = boxes$ymax[-1]
+    ),
+    aes(x = x, xend = xend, y = y, yend = yend),
+    arrow = arrow(length = unit(0.25, "cm"))
+  ) +
   
   # Horizontal exclusion arrows
-  geom_segment(aes(x = 6, xend = 9, y = 11, yend = 11),
-               arrow = arrow(length = unit(0.25, "cm"))) +
-  geom_segment(aes(x = 6, xend = 9, y = 8, yend = 8),
-               arrow = arrow(length = unit(0.25, "cm"))) +
-  geom_segment(aes(x = 6, xend = 9, y = 5, yend = 5),
-               arrow = arrow(length = unit(0.25, "cm"))) +
-  geom_segment(aes(x = 6, xend = 9, y = 2, yend = 2),
-               arrow = arrow(length = unit(0.25, "cm"))) +
+  geom_segment(
+    data = data.frame(
+      x = 6, xend = 9,
+      y = (boxes$ymin[seq_len(nrow(exclusions))] + boxes$ymax[seq_len(nrow(exclusions))]) / 2,
+      yend = (boxes$ymin[seq_len(nrow(exclusions))] + boxes$ymax[seq_len(nrow(exclusions))]) / 2
+    ),
+    aes(x = x, xend = xend, y = y, yend = yend),
+    arrow = arrow(length = unit(0.25, "cm"))
+  ) +
   
   # Text labels
   geom_text(data = boxes,
             aes(x = 3, y = (ymin + ymax)/2, label = label),
-            size = 3.8) +
+            size = 3.2) +
   
   geom_text(data = exclusions,
             aes(x = 12, y = (ymin + ymax)/2, label = label),
-            size = 3.6) +
-  
-  # Title
-  labs(title = "Participant Flow Chart") +
+            size = 3.0, lineheight = 0.95) +
   
   theme_void() +
   theme(
@@ -88,7 +97,7 @@ p <- ggplot() +
   
   coord_fixed() +
   xlim(-1, 16) +
-  ylim(-3, 13)
+  ylim(min(boxes$ymin) - 1, top_y + 1)
 
 # Save as publishable-quality JPEG (300 dpi, Times New Roman)
 ggsave(

@@ -1,6 +1,6 @@
 ---
 title: 'Chemical Mixtures and Accelerated Biological Aging in CKD: NHANES Analysis'
-author: "Reproducible NHANES analysis template"
+author: "Reproducible NHANES analysis By January"
 date: "`r format(Sys.Date())`"
 output:
   pdf_document:
@@ -33,8 +33,6 @@ config <- list(
   exposure_family = "pfas", # pfas, metals, both
   q = 4,
   min_age = 20,
-  middle_age_min = 40,
-  middle_age_max = 64,
   ckd_def = "egfr_or_acr", # egfr_or_acr, egfr_only, acr_only
   use_residualized_phenoage = TRUE,   # PhenoAgeAccel is always residualized; option reserved for future.
   # Primary analysis uses fixed 4-PFAS set with complete-case; strict (qgcomp-compatible subset) is sensitivity.
@@ -42,8 +40,8 @@ config <- list(
   min_nonmissing_exposure_fraction = 0.6,
   min_nonmissing_exposures_floor = 2,
   include_clinical_covariates = TRUE,    # Not wired to primary (6-variable set); reserved for future sensitivity.
-  # PFAS mixture models should use MEC exam weights.
-  weight_type = "auto",  # Use weight audit; PFAS may require environmental subsample weight (e.g. WTSB2YR) per cycle.
+  # Weight is resolved from audit; PFAS workflow prioritizes environmental subsample WTS* weights.
+  weight_type = "auto",  # Auto-resolve from audit in the exposure-complete sample (PFAS excludes WTINT2YR/WTMEC2YR).
   verbose = TRUE
 )
 config
@@ -253,7 +251,7 @@ resolve_weight_var <- function(df, weight_type = "auto", exposure_family = "pfas
     if (!(weight_type %in% cols)) stop("Requested weight variable not found: ", weight_type)
     return(list(var = weight_type, note = paste("User-specified weight:", weight_type)))
   }
-  if ("WTMEC2YR" %in% cols) return(list(var = "WTMEC2YR", note = "Using MEC weight WTMEC2YR. Review weight audit table below to verify this is appropriate for your exposure/biomarker combination."))
+  if ("WTMEC2YR" %in% cols) return(list(var = "WTMEC2YR", note = "Generic fallback: using MEC weight WTMEC2YR because no exposure-specific subsample weight has been resolved. In PFAS analyses, final design should normally use the PFAS-specific subsample weight identified by the audit/auto-selection logic."))
   stop("No supported NHANES weight variable found.")
 }
 
@@ -264,7 +262,11 @@ apply_lod_rule <- function(df, varname) {
   lc_candidates <- c(
     paste0(varname, "LC"),
     paste0("LBD", base, "LC"),
-    paste0("URD", base, "LC")
+    paste0("URD", base, "LC"),
+    # NHANES often uses *L (not *LC) as the detection-limit flag.
+    paste0(varname, "L"),
+    paste0("LBD", base, "L"),
+    paste0("URD", base, "L")
   )
   lc_candidates <- lc_candidates[lc_candidates %in% names(df)]
 
@@ -339,7 +341,7 @@ download_cycle <- function(cycle, exposure_family = "pfas", verbose = TRUE) {
     }
     if ("SEQN" %in% names(d)) dat <- left_join(dat, d, by = "SEQN")
   }
-  # After merge: define explicit glucose sources. Primary analysis uses MEC-only when using WTMEC2YR.
+  # After merge: define explicit glucose sources. Primary analysis uses MEC chemistry glucose for measurement consistency in PhenoAge construction.
   dat$glu_mec  <- coalesce_num(dat, c("LBXGLU", "LBXSGL"))
   dat$glu_glu  <- coalesce_num(dat, c("LBXGLU_GLU", "LBXSGL_GLU"))
   dat$glu     <- dat$glu_mec
@@ -465,7 +467,7 @@ dat <- nhanes_raw %>%
 # Compute biomarkers, CKD markers, and design variables outside mutate (avoids cur_data_all()).
 dat$alb <- coalesce_num(dat, c("LBXSAL"))
 dat$scr <- coalesce_num(dat, c("LBXSCR", "LBDSCRSI"))
-# Glucose: glu_mec / glu_glu / glu set in download_cycle (primary uses MEC-only for WTMEC2YR consistency).
+# Glucose: glu_mec / glu_glu / glu set in download_cycle (primary uses glu_mec by design).
 if (!"glu" %in% names(dat)) dat$glu <- dat$glu_mec
 dat$crp <- coalesce_num(dat, c("LBXCRP", "LBXHSCRP"))
 dat$lym <- coalesce_num(dat, c("LBXLYPCT"))
@@ -588,7 +590,7 @@ glu_by_cycle <- dat %>%
     max_glu = max(glu, na.rm = TRUE),
     .groups = "drop"
   )
-kable(glu_by_cycle, caption = "Glucose provenance by cycle. If source_table is a fasting component (GLU_*), fasting subsample weights are required.")
+kable(glu_by_cycle, caption = "Glucose provenance by cycle. If source_table is a fasting component (GLU_*), use a compatible fasting subsample weight.")
 
 glu_med <- median(dat$glu, na.rm = TRUE)
 if (!is.na(glu_med) && glu_med < 6) {
@@ -602,9 +604,9 @@ glu_is_fasting <- length(glu_tables_used) > 0 && any(str_detect(glu_tables_used,
 if (glu_is_fasting) {
   message(">>> IMPORTANT: Glucose sourced from fasting component table(s) [",
           paste(glu_tables_used, collapse = ", "),
-          "]. Fasting subsample weights (e.g., WTSAF2YR) are required. ",
-          "Using MEC weights with fasting glucose will produce biased estimates. ",
-          "Set config$weight_type to the correct fasting weight after reviewing the weight audit.")
+          "]. A compatible fasting subsample weight (e.g., WTSAF2YR) is required. ",
+          "Using a non-fasting or otherwise incompatible weight can bias estimates. ",
+          "Review the weight audit; override config$weight_type only if auto-selection does not resolve the correct subsample weight.")
 } else if (length(glu_tables_used) > 0) {
   message(">>> Glucose source table(s): ", paste(glu_tables_used, collapse = ", "),
           ". Verify whether this is a fasting component.")
@@ -713,6 +715,56 @@ if (mean(pheno_core$mort > 0.9999, na.rm = TRUE) > 0.25) {
 
 ```{r exposure-processing}
 pfas_vars <- c("LBXPFOS", "LBXPFOA", "LBXPFNA", "LBXPFHS", "LBXPFDA")
+
+# --- ISOMER HARMONIZATION (2013-2018) ---
+# NHANES split PFOS and PFOA into linear and branched isomers.
+# We must apply the LOD/sqrt(2) rule to the individual isomers FIRST, then sum them.
+
+isomer_map <- list(
+  pfos_lin = c("SSNPFOS", "LBXNFOS"),
+  pfos_br  = c("SSMPFOS", "LBXMFOS"),
+  pfoa_lin = c("SSNPFOA", "LBXNFOA"),
+  pfoa_br  = c("SSBPFOA", "LBXBFOA")
+)
+
+lc_map <- list(
+  pfos_lin = c("SDNPFOSL", "LBDNFOSL"),
+  pfos_br  = c("SDMPFOSL", "LBDMFOSL"),
+  pfoa_lin = c("SDNPFOAL", "LBDNFOAL"),
+  pfoa_br  = c("SDBPFOAL", "LBDBFOAL")
+)
+
+for (chem in c("pfos", "pfoa")) {
+  # Get available variables for the cycle
+  lin_vars <- isomer_map[[paste0(chem, "_lin")]]
+  br_vars  <- isomer_map[[paste0(chem, "_br")]]
+  lin_lc   <- lc_map[[paste0(chem, "_lin")]]
+  br_lc    <- lc_map[[paste0(chem, "_br")]]
+  
+  lin_val <- coalesce_num(dat, lin_vars)
+  br_val  <- coalesce_num(dat, br_vars)
+  lin_lc_val <- coalesce_num(dat, lin_lc)
+  br_lc_val  <- coalesce_num(dat, br_lc)
+  
+  # Apply LOD rule: if indicator == 1, divide by sqrt(2)
+  lin_val <- ifelse(!is.na(lin_lc_val) & lin_lc_val == 1, lin_val / sqrt(2), lin_val)
+  br_val  <- ifelse(!is.na(br_lc_val) & br_lc_val == 1, br_val / sqrt(2), br_val)
+  
+  # Sum them to recreate the total concentration
+  summed_val <- lin_val + br_val
+  
+  # Inject back into the legacy total variables (LBXPFOS or LBXPFOA)
+  target_var <- ifelse(chem == "pfos", "LBXPFOS", "LBXPFOA")
+  
+  if (target_var %in% names(dat)) {
+    dat[[target_var]] <- coalesce_num(dat, c(target_var))
+    dat[[target_var]] <- ifelse(is.na(dat[[target_var]]) & !is.na(summed_val), summed_val, dat[[target_var]])
+  } else {
+    dat[[target_var]] <- summed_val
+  }
+}
+# --- END ISOMER HARMONIZATION ---
+
 blood_metal_vars <- c("LBXBPB", "LBXBCD", "LBXTHG")
 urine_metal_vars <- c("URXUAS", "URXUCD", "URXUPB")
 
@@ -752,7 +804,10 @@ adaptive_exposure_vars <- exposure_vars
 lod_diag <- lapply(chosen_exposures, function(v) {
   x_raw <- suppressWarnings(as.numeric(as.character(dat[[v]])))
   base <- sub("^(LBX|URX)", "", v)
-  lc_candidates <- c(paste0(v, "LC"), paste0("LBD", base, "LC"), paste0("URD", base, "LC"))
+  lc_candidates <- c(
+    paste0(v, "LC"), paste0("LBD", base, "LC"), paste0("URD", base, "LC"),
+    paste0(v, "L"),  paste0("LBD", base, "L"),  paste0("URD", base, "L")
+  )
   lc_var <- lc_candidates[lc_candidates %in% names(dat)]
   has_lc <- length(lc_var) > 0
   if (has_lc) {
@@ -787,13 +842,23 @@ kable(lod_diag, caption = "LOD diagnostic per exposure by cycle. Verify: median_
 analytic <- dat %>%
   filter(age >= config$min_age)
 
+# PFAS workflow: harmonize rotating 2-year subsample weights into one unified PFAS weight (WTPFAS2YR).
+analytic <- analytic %>%
+  mutate(
+    WTPFAS2YR = coalesce_num(cur_data(), c("WTSA2YR", "WTSB2YR", "WTSC2YR", "WTSAF2YR"))
+  )
+
 weight_candidates <- names(analytic)[stringr::str_detect(names(analytic), "^WT")]
 kable(data.frame(weight_variable = weight_candidates), caption = "Weight audit: all WT* variables in analytic dataset.")
 
-# Exposure-specific weight audit: among participants with complete primary (fixed) exposure data.
+# Exposure-specific weight audit in the exposure-complete analytic sample (fixed primary PFAS set).
 complete_expo <- analytic %>%
   mutate(.has_all_expo = if_all(all_of(primary_exposure_vars), ~ !is.na(.x)))
 wt_cols <- names(analytic)[str_detect(names(analytic), "^WT")]
+# PFAS auto-selection eligibility: exclude full-sample interview/MEC weights; keep PFAS-appropriate subsample candidates.
+if (tolower(config$exposure_family) == "pfas") {
+  wt_cols <- setdiff(wt_cols, c("WTINT2YR", "WTMEC2YR"))
+}
 if (length(wt_cols) > 0) {
   wt_audit <- complete_expo %>%
     filter(.has_all_expo) %>%
@@ -803,11 +868,16 @@ if (length(wt_cols) > 0) {
   kable(wt_audit, caption = "Weight availability (%) among participants with complete exposure set. Use the weight with highest coverage that matches your subsample.")
 }
 
-# Safety rail: if auto weight is WTMEC2YR but a different weight has meaningfully
-# better coverage among the exposure-complete subsample, stop and require manual choice.
-# Auto-weight: apply top-coverage weight from audit instead of stopping (PFAS/subsample may need WTSB2YR etc.).
+# Auto-weight: rank eligible candidate weights by coverage and apply the top PFAS-appropriate subsample weight.
 if (config$weight_type == "auto" && exists("wt_audit") && nrow(wt_audit) > 0) {
-  top_row <- wt_audit %>% slice(1)
+  wt_audit_auto <- wt_audit
+  if (tolower(config$exposure_family) == "pfas") {
+    wt_audit_auto <- wt_audit_auto %>% filter(!(weight %in% c("WTINT2YR", "WTMEC2YR")))
+  }
+  if (nrow(wt_audit_auto) == 0) {
+    stop("Auto-weight selection failed for PFAS: no eligible WTS* subsample weights were available in the audit table.")
+  }
+  top_row <- wt_audit_auto %>% slice(1)
   config$weight_type <- top_row$weight
   message(">>> Auto-weight resolved: Applying '", config$weight_type, "' (Coverage: ", top_row$pct_nonmissing_complete_expo, "%)")
 }
@@ -820,7 +890,7 @@ analytic <- analytic %>%
   filter(!is.na(phenoage), !is.na(age), !is.na(ckd), !is.na(weight_2yr), !is.na(strata), !is.na(psu))
 
 n_cycles <- length(unique(analytic$cycle))
-# Weight pooling uses cycles where primary (fixed) PFAS are available; repool_weights() will recompute per final sample.
+# After resolving the PFAS-appropriate 2-year weight, pooled analyses divide by the number of contributing cycles in the final sample (NCHS multi-cycle guidance).
 n_cycles_exposure_available <- analytic %>%
   filter(if_any(all_of(primary_exposure_vars), ~ !is.na(.x))) %>%
   summarise(n = n_distinct(cycle)) %>%
@@ -892,7 +962,7 @@ valid_num <- function(v, d) v %in% names(d) && length(unique(stats::na.omit(d[[v
 valid_cat <- function(v, d) v %in% names(d) && length(unique(stats::na.omit(as.character(d[[v]])))) >= 2
 
 # Primary adjustment: lean set to avoid overadjustment/mediator bias (diabetes, HTN, CVD may be on pathway).
-# Aligned with EHP/Env Int mixture papers: age, sex, race, PIR, BMI, smoking, cycle only.
+# Aligned with EHP/Env Int mixture papers: sex, race, PIR, BMI, smoking, cycle only.
 clinical_covars <- c("diabetes", "hypertension", "cvd")  # used only in sensitivity "cardiometabolic"
 # No age: outcome is phenoage_accel (age-residualized). Same 6 covariates for qgcomp and Model B.
 covars <- c(
@@ -1016,7 +1086,7 @@ if (!is.null(fit_qg_overall)) {
 }
 
 # Survey-weighted interaction model using quantized summed score.
-# Quantile cutpoints are computed with pooled sampling weights.
+# Quantile cutpoints are computed within each NHANES cycle using cycle-specific sampling weights.
 qdat <- analytic
 qdat$ckd <- as.integer(qdat$ckd)
 # Strict sample = complete-case on qgcomp-compatible PFAS subset (same as analytic_qg). Label reflects this.
@@ -1423,10 +1493,12 @@ fmt <- function(x, digits = 3) {
 }
 fmt_p <- function(x) ifelse(is.na(x), "NA", ifelse(x < 0.001, "<0.001", format(round(x, 3), nsmall = 3)))
 
-# Table 1: weighted characteristics by CKD -- mean (SE) or % (SE)
-t1_mean_se <- function(formula, design) {
+# Table 1: weighted characteristics by CKD -- continuous: mean (SD); categorical: % (SE)
+t1_mean_sd <- function(formula, design) {
   est <- svymean(formula, design, na.rm = TRUE)
-  paste0(format(round(coef(est)[1], 2), nsmall = 2), " (", format(round(SE(est)[1], 2), nsmall = 2), ")")
+  v_obj <- svyvar(formula, design, na.rm = TRUE)
+  sd_val <- sqrt(as.numeric(coef(v_obj)[1]))
+  paste0(format(round(coef(est)[1], 2), nsmall = 2), " (", format(round(sd_val, 2), nsmall = 2), ")")
 }
 t1_mean_obj <- function(formula, design) {
   m <- svymean(formula, design, na.rm = TRUE)
@@ -1518,17 +1590,17 @@ cvd0 <- t1_pct_obj(~I(cvd == 1), svy0); cvd1 <- t1_pct_obj(~I(cvd == 1), svy1)
 
 table1 <- tibble(
   characteristic = c(
-    "N (unweighted)", "Age, mean (SE)", "Female, % (SE)",
+    "N (unweighted)", "Age, mean (SD)", "Female, % (SE)",
     "Hispanic, % (SE)", "Non-Hispanic White, % (SE)", "Non-Hispanic Black, % (SE)",
     "Non-Hispanic Asian, % (SE)", "Other/Multi, % (SE)",
     "Education <HS, % (SE)", "Education HS/GED, % (SE)", "Education >HS, % (SE)",
-    "PIR, mean (SE)", "BMI, mean (SE)",
+    "PIR, mean (SD)", "BMI, mean (SD)",
     "Current smoker, % (SE)", "Alcohol (yes), % (SE)", "Physically active, % (SE)",
     "Diabetes, % (SE)", "Hypertension, % (SE)", "CVD history, % (SE)"
   ),
   `No CKD` = c(
     as.character(sum(analytic$ckd == 0, na.rm = TRUE)),
-    t1_mean_se(~age, svy0),
+    t1_mean_sd(~age, svy0),
     t1_pct_se(~I(sex == "Female"), svy0),
     t1_factor_level_pct_se("race_eth", "Hispanic", svy0),
     t1_factor_level_pct_se("race_eth", "Non-Hispanic White", svy0),
@@ -1538,8 +1610,8 @@ table1 <- tibble(
     t1_factor_level_pct_se("education", "<HS", svy0),
     t1_factor_level_pct_se("education", "HS/GED", svy0),
     t1_factor_level_pct_se("education", ">HS", svy0),
-    t1_mean_se(~pir, svy0),
-    t1_mean_se(~bmi, svy0),
+    t1_mean_sd(~pir, svy0),
+    t1_mean_sd(~bmi, svy0),
     t1_pct_se(~I(smoker == 1), svy0),
     t1_pct_se(~I(alcohol == 1), svy0),
     t1_pct_se(~I(phys_active == 1), svy0),
@@ -1549,7 +1621,7 @@ table1 <- tibble(
   ),
   CKD = c(
     as.character(sum(analytic$ckd == 1, na.rm = TRUE)),
-    t1_mean_se(~age, svy1),
+    t1_mean_sd(~age, svy1),
     t1_pct_se(~I(sex == "Female"), svy1),
     t1_factor_level_pct_se("race_eth", "Hispanic", svy1),
     t1_factor_level_pct_se("race_eth", "Non-Hispanic White", svy1),
@@ -1559,8 +1631,8 @@ table1 <- tibble(
     t1_factor_level_pct_se("education", "<HS", svy1),
     t1_factor_level_pct_se("education", "HS/GED", svy1),
     t1_factor_level_pct_se("education", ">HS", svy1),
-    t1_mean_se(~pir, svy1),
-    t1_mean_se(~bmi, svy1),
+    t1_mean_sd(~pir, svy1),
+    t1_mean_sd(~bmi, svy1),
     t1_pct_se(~I(smoker == 1), svy1),
     t1_pct_se(~I(alcohol == 1), svy1),
     t1_pct_se(~I(phys_active == 1), svy1),
@@ -1863,8 +1935,8 @@ tab4 <- bind_rows(
     N,
     model = "Sensitivity"
   )
-kable(tab4, caption = "Table 4. Sensitivity analyses (primary adjustment: age, sex, race, PIR, BMI, smoking, cycle)")
-cat("\n*Table 4 note:* Primary and most sensitivity models use the lean adjustment set (age, sex, race/ethnicity, PIR, BMI, smoking, cycle). ",
+kable(tab4, caption = "Table 4. Sensitivity analyses (primary adjustment: sex, race, PIR, BMI, smoking, cycle)")
+cat("\n*Table 4 note:* Primary and most sensitivity models use the lean adjustment set (sex, race/ethnicity, PIR, BMI, smoking, cycle). ",
     "One row adds diabetes, hypertension, and CVD with explicit labeling that these may be on the causal pathway. ",
     "Each row reports the `mixture_qscore` coefficient from a survey-weighted model (`svyglm`) with NHANES design variables.\n")
 
@@ -1923,164 +1995,6 @@ kable(
   caption = "Supplementary Table. Single-pollutant associations with PhenoAge acceleration (survey-weighted, same 6-variable adjustment as Model B)."
 )
 kable(single_pollutant_diagnostics, caption = "Supplementary model diagnostics (single-pollutant dropped covariates and fit errors).")
-
-# Middle-aged men subgroup tables (age window defined in config).
-middle_men <- qdat %>%
-  filter(
-    !is.na(age),
-    age >= config$middle_age_min,
-    age <= config$middle_age_max,
-    !is.na(sex),
-    toupper(as.character(sex)) == "MALE"
-  )
-
-if (nrow(middle_men) > 0) {
-  middle_men <- repool_weights(middle_men)
-  covars_mam <- c(
-    if (valid_cat("sex", middle_men)) "factor(sex)",
-    if (valid_cat("race_eth", middle_men)) "factor(race_eth)",
-    if (valid_num("pir", middle_men)) "pir",
-    if (valid_num("smoker", middle_men)) "smoker",
-    if (valid_num("bmi", middle_men)) "bmi",
-    if (valid_cat("cycle", middle_men)) "factor(cycle)"
-  )
-
-  # MAM Table 2 (descriptive overall qgcomp)
-  qg_exposure_vars_mam <- qg_exposure_vars[vapply(qg_exposure_vars, function(v) {
-    x <- suppressWarnings(as.numeric(middle_men[[v]]))
-    x <- x[is.finite(x)]
-    length(x) > 0 && dplyr::n_distinct(x) >= 2
-  }, logical(1))]
-  covars_qg_mam <- covars_mam
-  build_qg_mam_formula <- function(exps, covs) {
-    rhs <- paste(c(exps, covs), collapse = " + ")
-    as.formula(paste("phenoage_accel ~", rhs))
-  }
-  f_qg_mam <- build_qg_mam_formula(qg_exposure_vars_mam, covars_qg_mam)
-  mam_qg <- middle_men
-  repeat {
-    mf_qg_mam <- tryCatch(model.frame(f_qg_mam, data = mam_qg, na.action = na.omit), error = function(e) NULL)
-    if (is.null(mf_qg_mam) || nrow(mf_qg_mam) == 0) break
-    factor_terms_mam <- names(mf_qg_mam)[vapply(mf_qg_mam, is.factor, logical(1))]
-    bad_factor_terms_mam <- factor_terms_mam[vapply(mf_qg_mam[factor_terms_mam], function(x) nlevels(droplevels(x)) < 2, logical(1))]
-    removable_mam <- intersect(covars_qg_mam, bad_factor_terms_mam)
-    if (length(removable_mam) == 0) break
-    covars_qg_mam <- setdiff(covars_qg_mam, removable_mam)
-    f_qg_mam <- build_qg_mam_formula(qg_exposure_vars_mam, covars_qg_mam)
-  }
-  mam_qg <- if (exists("mf_qg_mam") && !is.null(mf_qg_mam) && nrow(mf_qg_mam) > 0) middle_men[as.integer(rownames(mf_qg_mam)), , drop = FALSE] else middle_men[0, , drop = FALSE]
-  if (nrow(mam_qg) > 0) mam_qg$weight_normalized <- mam_qg$weight_combined / mean(mam_qg$weight_combined, na.rm = TRUE)
-  fit_qg_mam <- if (nrow(mam_qg) > 0 && length(qg_exposure_vars_mam) >= 3) {
-    tryCatch(
-      qgcomp::qgcomp.noboot(
-        f = f_qg_mam, expnms = qg_exposure_vars_mam, data = mam_qg,
-        family = gaussian(), q = q_qg, weights = mam_qg$weight_normalized
-      ),
-      error = function(e) NULL
-    )
-  } else NULL
-  tab_mam2 <- safe_qgcomp_extract(
-    fit_qg_mam,
-    "Middle-aged men: Overall mixture effect",
-    nrow(mam_qg)
-  ) %>%
-    mutate(
-      beta = fmt(beta),
-      conf.low = fmt(conf.low),
-      conf.high = fmt(conf.high),
-      p.value = fmt_p(p.value),
-      interpretation = "Change in PhenoAge acceleration (years)"
-    )
-  kable(tab_mam2, caption = paste0(
-    "Middle-aged men (", config$middle_age_min, "-", config$middle_age_max,
-    " y): descriptive overall mixture association (qgcomp)."
-  ))
-
-  # MAM Table 3 (interaction model + marginal effects)
-  mam_int_obj <- fit_svy_with_covar_guard(middle_men, "phenoage_accel", c("mixture_qscore * ckd"), covars_mam, "Middle-aged men interaction")
-  fit_int_mam <- mam_int_obj$fit
-  n_mam_int <- mam_int_obj$n_model
-  if (!is.null(fit_int_mam)) {
-    int_tidy_mam <- broom::tidy(fit_int_mam, conf.int = TRUE)
-    cf_names_mam <- names(coef(fit_int_mam))
-    int_terms_mam <- c("mixture_qscore", cf_names_mam[str_detect(cf_names_mam, "^ckd$|mixture_qscore:ckd")])
-    tab_mam3_raw <- int_tidy_mam %>%
-      filter(term %in% int_terms_mam) %>%
-      transmute(
-        term,
-        beta = fmt(estimate),
-        conf.low = fmt(conf.low),
-        conf.high = fmt(conf.high),
-        p.value = fmt_p(p.value),
-        N = n_mam_int,
-        model = "Middle-aged men: Mixture*CKD interaction"
-      )
-    int_name_mam <- cf_names_mam[str_detect(cf_names_mam, "mixture_qscore:ckd")]
-    if (length(int_name_mam) == 1) {
-      c0 <- setNames(rep(0, length(cf_names_mam)), cf_names_mam); c0["mixture_qscore"] <- 1
-      c1 <- setNames(rep(0, length(cf_names_mam)), cf_names_mam); c1["mixture_qscore"] <- 1; c1[int_name_mam] <- 1
-      ctr0 <- svycontrast(fit_int_mam, c0)
-      ctr1 <- svycontrast(fit_int_mam, c1)
-      ddf <- fit_int_mam$df.residual; if (is.null(ddf) || !is.finite(ddf)) ddf <- Inf
-      mk <- function(ctr, lbl) {
-        est <- as.numeric(coef(ctr)); se <- as.numeric(SE(ctr)); p <- 2 * pt(-abs(est / se), df = ddf)
-        tibble(term = lbl, beta = fmt(est), conf.low = fmt(est - qt(0.975, ddf) * se),
-               conf.high = fmt(est + qt(0.975, ddf) * se), p.value = fmt_p(p), N = n_mam_int,
-               model = "Middle-aged men: Marginal effects")
-      }
-      p_int <- int_tidy_mam %>% filter(term == int_name_mam) %>% pull(p.value)
-      p_int <- if (length(p_int) > 0) p_int[1] else NA_real_
-      tab_mam3 <- bind_rows(
-        tab_mam3_raw,
-        mk(ctr0, "Mixture effect among CKD=0"),
-        mk(ctr1, "Mixture effect among CKD=1"),
-        tibble(term = "P-interaction", beta = "", conf.low = "", conf.high = "", p.value = fmt_p(p_int), N = n_mam_int, model = "Middle-aged men: Marginal effects")
-      )
-    } else {
-      tab_mam3 <- tab_mam3_raw
-    }
-  } else {
-    tab_mam3 <- tibble(
-      term = c("mixture_qscore", "ckd", "mixture_qscore:ckd"),
-      beta = "NA", conf.low = "NA", conf.high = "NA", p.value = "NA",
-      N = n_mam_int, model = "Middle-aged men: interaction (not estimable)"
-    )
-  }
-  kable(tab_mam3, caption = paste0(
-    "Middle-aged men (", config$middle_age_min, "-", config$middle_age_max,
-    " y): interaction model with design-based marginal effects."
-  ))
-
-  # MAM Table 4 (sensitivities)
-  fit_mam_ckd_egfr <- fit_svy_with_covar_guard(
-    middle_men %>% mutate(ckd_sens = ifelse(!is.na(egfr), as.integer(egfr < 60), NA_integer_)) %>% filter(!is.na(ckd_sens)),
-    "phenoage_accel", c("mixture_qscore", "ckd_sens"), mam_int_obj$realized, "MAM CKD redefined as eGFR<60"
-  )
-  fit_mam_no_acute <- fit_svy_with_covar_guard(
-    middle_men %>% filter(is.na(crp_acute) | crp_acute == 0L),
-    "phenoage_accel", c("mixture_qscore", "ckd"), mam_int_obj$realized, "MAM exclude CRP > 1 mg/dL"
-  )
-  tab_mam4 <- bind_rows(
-    get_mix_row(fit_mam_ckd_egfr$fit, "CKD redefined as eGFR<60", fit_mam_ckd_egfr$n_model),
-    get_mix_row(fit_mam_no_acute$fit, "Exclude participants with CRP > 1 mg/dL", fit_mam_no_acute$n_model)
-  ) %>%
-    transmute(
-      sensitivity,
-      beta = fmt(estimate),
-      conf.low = fmt(conf.low),
-      conf.high = fmt(conf.high),
-      p.value = fmt_p(p.value),
-      N,
-      model = "Middle-aged men: Sensitivity"
-    )
-  kable(tab_mam4, caption = paste0(
-    "Middle-aged men (", config$middle_age_min, "-", config$middle_age_max,
-    " y): sensitivity analyses."
-  ))
-} else {
-  kable(tibble(message = paste0("No middle-aged men available in primary interaction sample for age ", config$middle_age_min, "-", config$middle_age_max, ".")),
-        caption = "Middle-aged men subgroup analysis status.")
-}
 ```
 
 # Figures
@@ -2107,7 +2021,7 @@ pred_lines <- tryCatch({
   bind_rows(pdat_list)
 }, error = function(e) NULL)
 
-# Overall marginal direction: as mixture increases, what happens to phenoage_accel (pooled, age-adjusted)
+# Overall marginal direction: as mixture increases, what happens to phenoage_accel (pooled model).
 overall_direction <- tryCatch({
   svy_full <- svydesign(id = ~psu, strata = ~strata, weights = ~weight_combined, nest = TRUE, data = qdat)
   fit_overall <- svyglm(phenoage_accel ~ mixture_qscore, design = svy_full, family = gaussian())
@@ -2221,14 +2135,14 @@ if (!is.null(fit_int)) {
 - PhenoAge includes kidney-related biomarkers (creatinine, albumin), creating potential circularity with CKD definitions. Sensitivity analyses recompute PhenoAge excluding (a) creatinine only and (b) both creatinine and albumin; both are non-standard derivatives and interpreted as robustness checks.
 - PhenoAge uses Levine (2018) coefficients with correct units: albumin g/L (NHANES g/dL × 10), creatinine µmol/L (mg/dL × 88.4), glucose mmol/L (mg/dL ÷ 18.018). Model B uses phenoage_accel (age-residualized) and does not adjust for age again. Mixture quantiles are computed within each NHANES cycle to avoid temporal confounding (PFAS trends 2003–2018). Survey design uses full PSU/strata when possible; if the design fails (e.g. singleton PSUs), a weights-only fallback is used and noted.
 - `qgcomp` point estimates are presented descriptively (pooled sampling weights applied, but PSU/strata not incorporated for variance estimation). Statistical inference relies on the survey-weighted regression models (`svyglm`) above. Bootstrap variance estimation incorporating replicate weights was not implemented because NHANES does not provide replicate weights for environmental subsamples across all cycles.
-- LOD handling follows the NHANES convention when LC indicators are available: values flagged below LOD (LC == 1) are replaced with value / sqrt(2). When no LC indicator is available, values are left unchanged (no fallback NA imputation), which improves transparency but can reduce complete-case sample size.
-- **Weight selection**: a weight audit table is printed so the analyst can verify the correct weight for the specific exposure/biomarker subsample. By default WTMEC2YR is used; if the chosen exposure family requires a subsample weight (e.g., PFAS in certain cycles), the analyst should set `config$weight_type` to the appropriate column name after reviewing the audit.
+- LOD handling follows NHANES detection-flag conventions when indicator columns are available (`*LC` or `*L`): values flagged below LOD (indicator == 1) are replaced with value / sqrt(2). When no LOD indicator is available, values are left unchanged (no fallback NA imputation), which improves transparency but can reduce complete-case sample size.
+- **Weight selection**: a weight audit table is printed and `config$weight_type = "auto"` applies the top-coverage eligible weight. For PFAS, auto-selection excludes full-sample interview/MEC weights (`WTINT2YR`, `WTMEC2YR`) and prioritizes environmental subsample weights (`WTS*2YR`), including the combined cross-cycle PFAS weight column.
 - The primary PFAS mixture was defined as a fixed four-chemical set available across all retained cycles (PFOS, PFOA, PFNA, and PFHxS), with complete-case requirement on that set. PFDA was not consistently available across cycles and was therefore excluded from the primary mixture and evaluated only in supplementary analyses. Strict complete-case (qgcomp-compatible PFAS subset) modeling is reported as sensitivity. A sensitivity analysis using an available-exposure (adaptive) mixture can be added to assess robustness when using broader PFAS information.
-- Exposure quantile cutpoints are defined using pooled NHANES sampling weights.
+- Exposure quantile cutpoints are defined within cycle using cycle-specific NHANES sampling weights.
 - PhenoAgeAccel is computed as the residual from a survey-weighted regression of PhenoAge on chronological age (`svyglm`), ensuring the construct is population-representative. An unweighted residualization is included as sensitivity.
 - CRP unit detection uses a two-part rule: (1) table-name provenance (HSCRP tables imply mg/L), and (2) a conservative distribution heuristic (median > 1.5 **and** p75 > 3). If either triggers, CRP is converted from mg/L to mg/dL (/ 10). Cycle-level diagnostic tables are printed. PhenoAge is recomputed after any conversions. Glucose is converted from mmol/L to mg/dL if median < 6.
 - Extreme biomarker values are handled by plausibility filters (WBC > 50, glucose > 600, ALP > 500 set to missing). CRP > 1 mg/dL is retained in primary analyses and evaluated in sensitivity analyses excluding potential acute inflammatory states.
-- Glucose is sourced from MEC biochemistry only (`glu_mec`: BIOPRO/L40) for the primary analysis so that it aligns with MEC weights (`WTMEC2YR`). The separate GLU table (fasting) is joined with renamed variables (`LBXGLU_GLU`, `LBXSGL_GLU`) to avoid duplicate columns; it is not used in the primary model.
+- Glucose is sourced from MEC biochemistry (`glu_mec`: BIOPRO/L40) for the primary analysis. The separate GLU table (fasting) is joined with renamed variables (`LBXGLU_GLU`, `LBXSGL_GLU`) to avoid duplicate columns; it is retained for diagnostics but not used in the primary model.
 - Marginal effects in the interaction model (Table 3) use `svycontrast()` with design-based degrees of freedom and t-distribution p-values, maintaining full complex-survey consistency.
 - Because complete-case requirements can collapse factor levels in the interaction model frame, Model B reports both intended and realized covariate sets; unsupported factor terms are dropped with explicit logging.
 
