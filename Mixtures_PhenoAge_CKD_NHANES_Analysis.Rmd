@@ -1493,7 +1493,7 @@ fmt <- function(x, digits = 3) {
 }
 fmt_p <- function(x) ifelse(is.na(x), "NA", ifelse(x < 0.001, "<0.001", format(round(x, 3), nsmall = 3)))
 
-# Table 1: weighted characteristics by CKD -- continuous: mean (SD); categorical: % (SE)
+# Table 1: characteristics by CKD -- continuous: mean (SD); categorical: n (weighted %)
 t1_mean_sd <- function(formula, design) {
   est <- svymean(formula, design, na.rm = TRUE)
   v_obj <- svyvar(formula, design, na.rm = TRUE)
@@ -1523,6 +1523,24 @@ t1_pct_se <- function(formula, design) {
     ")"
   )
 }
+t1_n_wpct <- function(cond_vec, formula, design) {
+  n_unwt <- sum(cond_vec, na.rm = TRUE)
+  est <- svymean(formula, design, na.rm = TRUE)
+  cf <- coef(est)
+  idx <- 1
+  if (length(cf) > 1) {
+    nms <- names(cf)
+    idx_true <- which(str_detect(nms, "TRUE$"))
+    if (length(idx_true) == 0) idx_true <- which(str_detect(nms, "1$"))
+    if (length(idx_true) > 0) idx <- idx_true[1]
+  }
+  paste0(
+    format(n_unwt, big.mark = ","),
+    " (",
+    format(round(unname(cf[idx]) * 100, 1), nsmall = 1),
+    ")"
+  )
+}
 t1_pct_obj <- function(formula, design) {
   est <- svymean(formula, design, na.rm = TRUE)
   cf <- coef(est)
@@ -1544,6 +1562,20 @@ t1_factor_level_pct_se <- function(var, level, design) {
     format(round(unname(coef(est)[key]) * 100, 1), nsmall = 1),
     " (",
     format(round(unname(SE(est)[key]) * 100, 1), nsmall = 1),
+    ")"
+  )
+}
+t1_factor_level_n_wpct <- function(var, level, design, data) {
+  n_unwt <- sum(data[[var]] == level, na.rm = TRUE)
+  est <- svymean(as.formula(paste0("~factor(", var, ")")), design, na.rm = TRUE)
+  key <- paste0("factor(", var, ")", level)
+  if (!(key %in% names(coef(est)))) {
+    return(paste0(format(n_unwt, big.mark = ","), " (NA)"))
+  }
+  paste0(
+    format(n_unwt, big.mark = ","),
+    " (",
+    format(round(unname(coef(est)[key]) * 100, 1), nsmall = 1),
     ")"
   )
 }
@@ -1569,6 +1601,8 @@ fmt_smd <- function(x) ifelse(is.na(x), "", format(round(x, 3), nsmall = 3))
 
 svy0 <- subset(svy, ckd == 0)
 svy1 <- subset(svy, ckd == 1)
+analytic0 <- analytic[!is.na(analytic$ckd) & analytic$ckd == 0, ]
+analytic1 <- analytic[!is.na(analytic$ckd) & analytic$ckd == 1, ]
 age0 <- t1_mean_obj(~age, svy0); age1 <- t1_mean_obj(~age, svy1)
 fem0 <- t1_pct_obj(~I(sex == "Female"), svy0); fem1 <- t1_pct_obj(~I(sex == "Female"), svy1)
 his0 <- t1_factor_level_obj("race_eth", "Hispanic", svy0); his1 <- t1_factor_level_obj("race_eth", "Hispanic", svy1)
@@ -1590,55 +1624,55 @@ cvd0 <- t1_pct_obj(~I(cvd == 1), svy0); cvd1 <- t1_pct_obj(~I(cvd == 1), svy1)
 
 table1 <- tibble(
   characteristic = c(
-    "N (unweighted)", "Age, mean (SD)", "Female, % (SE)",
-    "Hispanic, % (SE)", "Non-Hispanic White, % (SE)", "Non-Hispanic Black, % (SE)",
-    "Non-Hispanic Asian, % (SE)", "Other/Multi, % (SE)",
-    "Education <HS, % (SE)", "Education HS/GED, % (SE)", "Education >HS, % (SE)",
+    "N (unweighted)", "Age, mean (SD)", "Female, n (weighted %)",
+    "Hispanic, n (weighted %)", "Non-Hispanic White, n (weighted %)", "Non-Hispanic Black, n (weighted %)",
+    "Non-Hispanic Asian, n (weighted %)", "Other/Multi, n (weighted %)",
+    "Education <HS, n (weighted %)", "Education HS/GED, n (weighted %)", "Education >HS, n (weighted %)",
     "PIR, mean (SD)", "BMI, mean (SD)",
-    "Current smoker, % (SE)", "Alcohol (yes), % (SE)", "Physically active, % (SE)",
-    "Diabetes, % (SE)", "Hypertension, % (SE)", "CVD history, % (SE)"
+    "Current smoker, n (weighted %)", "Alcohol (yes), n (weighted %)", "Physically active, n (weighted %)",
+    "Diabetes, n (weighted %)", "Hypertension, n (weighted %)", "CVD history, n (weighted %)"
   ),
   `No CKD` = c(
     as.character(sum(analytic$ckd == 0, na.rm = TRUE)),
     t1_mean_sd(~age, svy0),
-    t1_pct_se(~I(sex == "Female"), svy0),
-    t1_factor_level_pct_se("race_eth", "Hispanic", svy0),
-    t1_factor_level_pct_se("race_eth", "Non-Hispanic White", svy0),
-    t1_factor_level_pct_se("race_eth", "Non-Hispanic Black", svy0),
-    t1_factor_level_pct_se("race_eth", "Non-Hispanic Asian", svy0),
-    t1_factor_level_pct_se("race_eth", "Other/Multi", svy0),
-    t1_factor_level_pct_se("education", "<HS", svy0),
-    t1_factor_level_pct_se("education", "HS/GED", svy0),
-    t1_factor_level_pct_se("education", ">HS", svy0),
+    t1_n_wpct(analytic0$sex == "Female", ~I(sex == "Female"), svy0),
+    t1_factor_level_n_wpct("race_eth", "Hispanic", svy0, analytic0),
+    t1_factor_level_n_wpct("race_eth", "Non-Hispanic White", svy0, analytic0),
+    t1_factor_level_n_wpct("race_eth", "Non-Hispanic Black", svy0, analytic0),
+    t1_factor_level_n_wpct("race_eth", "Non-Hispanic Asian", svy0, analytic0),
+    t1_factor_level_n_wpct("race_eth", "Other/Multi", svy0, analytic0),
+    t1_factor_level_n_wpct("education", "<HS", svy0, analytic0),
+    t1_factor_level_n_wpct("education", "HS/GED", svy0, analytic0),
+    t1_factor_level_n_wpct("education", ">HS", svy0, analytic0),
     t1_mean_sd(~pir, svy0),
     t1_mean_sd(~bmi, svy0),
-    t1_pct_se(~I(smoker == 1), svy0),
-    t1_pct_se(~I(alcohol == 1), svy0),
-    t1_pct_se(~I(phys_active == 1), svy0),
-    t1_pct_se(~I(diabetes == 1), svy0),
-    t1_pct_se(~I(hypertension == 1), svy0),
-    t1_pct_se(~I(cvd == 1), svy0)
+    t1_n_wpct(analytic0$smoker == 1, ~I(smoker == 1), svy0),
+    t1_n_wpct(analytic0$alcohol == 1, ~I(alcohol == 1), svy0),
+    t1_n_wpct(analytic0$phys_active == 1, ~I(phys_active == 1), svy0),
+    t1_n_wpct(analytic0$diabetes == 1, ~I(diabetes == 1), svy0),
+    t1_n_wpct(analytic0$hypertension == 1, ~I(hypertension == 1), svy0),
+    t1_n_wpct(analytic0$cvd == 1, ~I(cvd == 1), svy0)
   ),
   CKD = c(
     as.character(sum(analytic$ckd == 1, na.rm = TRUE)),
     t1_mean_sd(~age, svy1),
-    t1_pct_se(~I(sex == "Female"), svy1),
-    t1_factor_level_pct_se("race_eth", "Hispanic", svy1),
-    t1_factor_level_pct_se("race_eth", "Non-Hispanic White", svy1),
-    t1_factor_level_pct_se("race_eth", "Non-Hispanic Black", svy1),
-    t1_factor_level_pct_se("race_eth", "Non-Hispanic Asian", svy1),
-    t1_factor_level_pct_se("race_eth", "Other/Multi", svy1),
-    t1_factor_level_pct_se("education", "<HS", svy1),
-    t1_factor_level_pct_se("education", "HS/GED", svy1),
-    t1_factor_level_pct_se("education", ">HS", svy1),
+    t1_n_wpct(analytic1$sex == "Female", ~I(sex == "Female"), svy1),
+    t1_factor_level_n_wpct("race_eth", "Hispanic", svy1, analytic1),
+    t1_factor_level_n_wpct("race_eth", "Non-Hispanic White", svy1, analytic1),
+    t1_factor_level_n_wpct("race_eth", "Non-Hispanic Black", svy1, analytic1),
+    t1_factor_level_n_wpct("race_eth", "Non-Hispanic Asian", svy1, analytic1),
+    t1_factor_level_n_wpct("race_eth", "Other/Multi", svy1, analytic1),
+    t1_factor_level_n_wpct("education", "<HS", svy1, analytic1),
+    t1_factor_level_n_wpct("education", "HS/GED", svy1, analytic1),
+    t1_factor_level_n_wpct("education", ">HS", svy1, analytic1),
     t1_mean_sd(~pir, svy1),
     t1_mean_sd(~bmi, svy1),
-    t1_pct_se(~I(smoker == 1), svy1),
-    t1_pct_se(~I(alcohol == 1), svy1),
-    t1_pct_se(~I(phys_active == 1), svy1),
-    t1_pct_se(~I(diabetes == 1), svy1),
-    t1_pct_se(~I(hypertension == 1), svy1),
-    t1_pct_se(~I(cvd == 1), svy1)
+    t1_n_wpct(analytic1$smoker == 1, ~I(smoker == 1), svy1),
+    t1_n_wpct(analytic1$alcohol == 1, ~I(alcohol == 1), svy1),
+    t1_n_wpct(analytic1$phys_active == 1, ~I(phys_active == 1), svy1),
+    t1_n_wpct(analytic1$diabetes == 1, ~I(diabetes == 1), svy1),
+    t1_n_wpct(analytic1$hypertension == 1, ~I(hypertension == 1), svy1),
+    t1_n_wpct(analytic1$cvd == 1, ~I(cvd == 1), svy1)
   ),
   SMD = c(
     "",
@@ -1663,7 +1697,7 @@ table1 <- tibble(
   )
 )
 
-kable(table1, caption = "Table 1. Weighted sample characteristics by CKD status [mean (SE) or % (SE)] with SMD")
+kable(table1, caption = "Table 1. Sample characteristics by CKD status [continuous: mean (SD); categorical: n (weighted %)] with SMD")
 cat("\n*Table 1 note:* Weighted estimates use NHANES complex survey design (strata, PSU, combined weights). ",
     "SMD is the absolute standardized mean difference between CKD and No CKD groups; values >0.10 are typically considered meaningful imbalance.\n")
 
