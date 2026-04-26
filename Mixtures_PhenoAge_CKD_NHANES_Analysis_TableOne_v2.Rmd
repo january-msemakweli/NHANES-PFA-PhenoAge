@@ -138,6 +138,59 @@ parse_smq040 <- function(x) {
   )
 }
 
+# SMQ020 = "Smoked at least 100 cigarettes in entire life?" (the gate question for SMQ040).
+# 1 = Yes (lifetime smoker), 2 = No (never smoker), 7/9 = Refused/Don't know -> NA.
+parse_smq020 <- function(x) {
+  x_chr <- toupper(trimws(as.character(x)))
+  x_num <- suppressWarnings(as.numeric(as.character(x)))
+  case_when(
+    x_num == 1 ~ 1,
+    x_num == 2 ~ 0,
+    str_detect(x_chr, "^YES$") ~ 1,
+    str_detect(x_chr, "^NO$")  ~ 0,
+    TRUE ~ NA_real_
+  )
+}
+
+# Lifetime "ever drinker" indicator harmonized across NHANES cycles.
+#   ALQ101 (1999-2016) = ">=12 alcoholic drinks in any one year ever?"  (1=Yes / 2=No)
+#   ALQ110 (1999-2016) = ">=12 drinks in entire life?"  asked when ALQ101=No (1=Yes / 2=No)
+#   ALQ111 (2017+)     = "Ever had a drink of any kind of alcohol?"     (1=Yes / 2=No)
+# Returns 1 if ANY indicator is Yes, 0 if all available indicators are No, NA otherwise
+# (refused / don't know / not asked).
+parse_alq_ever <- function(alq101, alq110, alq111) {
+  e101 <- parse_yes_no(alq101)
+  e110 <- parse_yes_no(alq110)
+  e111 <- parse_yes_no(alq111)
+  case_when(
+    !is.na(e111) & e111 == 1 ~ 1,
+    !is.na(e101) & e101 == 1 ~ 1,
+    !is.na(e110) & e110 == 1 ~ 1,
+    !is.na(e111) & e111 == 0 ~ 0,
+    !is.na(e101) & e101 == 0 & (is.na(e110) | e110 == 0) ~ 0,
+    TRUE ~ NA_real_
+  )
+}
+
+# "Current drinker" (drank in past 12 months) harmonized across cycles.
+#   ALQ121 (2013-2018) = "Past 12 mo, how often drink alcoholic beverages?"
+#                         0 = Never in last year, 1-10 = various frequencies, 77/99 = Refused/DK.
+#   ALQ120Q (1999-2016) = "How often drink alcoholic beverages?" (numeric # of times)
+#                         in the unit specified by ALQ120U (week/month/year).
+#                         0 = Never; 1-365 = numeric answer; 777/999 = Refused/DK.
+# Returns 1 if any-frequency drinker, 0 if explicit "never in past year", NA otherwise.
+parse_alq_current_yr <- function(alq121, alq120q) {
+  c121 <- suppressWarnings(as.numeric(as.character(alq121)))
+  c120 <- suppressWarnings(as.numeric(as.character(alq120q)))
+  case_when(
+    !is.na(c121) & c121 %in% 1:10 ~ 1,
+    !is.na(c121) & c121 == 0 ~ 0,
+    !is.na(c120) & c120 >= 1 & c120 <= 365 ~ 1,
+    !is.na(c120) & c120 == 0 ~ 0,
+    TRUE ~ NA_real_
+  )
+}
+
 parse_phq_item <- function(x) {
   x_chr <- toupper(trimws(as.character(x)))
   x_num <- suppressWarnings(as.numeric(as.character(x)))
@@ -382,6 +435,25 @@ kable(
 # Variable Construction: PhenoAge, CKD, Covariates
 
 ```{r construct-vars}
+# Defensive guard: ensure cycle-dependent NHANES columns exist before referencing them
+# in the mutate below. cycle_data harmonization (Data Acquisition section) already pads
+# cycles to the union of column names, so these will normally be present -- but if the
+# user reconfigures `config$cycles` to drop certain ranges, some columns can vanish from
+# the union (e.g., ALQ142 only exists in 2017+; PAD200/PAD320 only exist in 1999-2006).
+# This block guarantees they exist as NA so the harmonized derivations below still run.
+required_optional_cols <- c(
+  # Smoking
+  "SMQ020", "SMQ040",
+  # Alcohol (cycle-dependent question wording -- see parser comments above)
+  "ALQ101", "ALQ110", "ALQ111", "ALQ120Q", "ALQ121", "ALQ142", "ALQ151",
+  # Physical activity (GPAQ in 2007+, legacy module in 1999-2006)
+  "PAD200", "PAD320", "PAQ650", "PAQ665"
+)
+for (.col in required_optional_cols) {
+  if (!.col %in% names(nhanes_raw)) nhanes_raw[[.col]] <- NA_character_
+}
+rm(.col)
+
 dpq_vars <- names(nhanes_raw)[str_detect(names(nhanes_raw), "^DPQ0")]
 
 dat <- nhanes_raw %>%
@@ -437,25 +509,85 @@ dat <- nhanes_raw %>%
     },
     pir = suppressWarnings(as.numeric(as.character(INDFMPIR))),
     bmi = suppressWarnings(as.numeric(as.character(BMXBMI))),
-    smoker = {
+    # ---- Categorical-variable derivations ---------------------------------
+    # Smoking: NHANES uses a 2-stage instrument. SMQ020 ("Ever smoked >=100 cigarettes
+    # in life?") is the GATE question; SMQ040 ("Do you now smoke?") is asked only of
+    # SMQ020==Yes respondents. Therefore an SMQ040-only derivation silently drops every
+    # never-smoker (SMQ020==No) to NA and excludes them from any complete-case modeling
+    # sample. Below we derive the standard 3-level smoker3 (Never/Former/Current) using
+    # SMQ020 + SMQ040, and a true binary smoker (Current vs. Not-current) that retains
+    # never-smokers as 0. This binary is what downstream models continue to use.
+    smoker3 = {
+      ever <- parse_smq020(SMQ020)
       smq040_chr <- toupper(trimws(as.character(SMQ040)))
       smq040_num <- suppressWarnings(as.numeric(as.character(SMQ040)))
-      case_when(
+      curr <- case_when(
         smq040_num %in% c(1, 2) ~ 1,
         smq040_num == 3 ~ 0,
         str_detect(smq040_chr, "EVERY DAY|SOME DAYS") ~ 1,
         str_detect(smq040_chr, "^NOT AT ALL$") ~ 0,
         TRUE ~ NA_real_
       )
+      case_when(
+        ever == 0 ~ "Never",
+        ever == 1 & curr == 1 ~ "Current",
+        ever == 1 & curr == 0 ~ "Former",
+        TRUE ~ NA_character_
+      )
     },
-    alcohol = parse_yes_no(ALQ151),
+    smoker = case_when(
+      smoker3 == "Current" ~ 1,
+      smoker3 %in% c("Never", "Former") ~ 0,
+      TRUE ~ NA_real_
+    ),
+    # Alcohol: harmonized 3-level Never/Former/Current drinker, parallel to smoker3.
+    # The previous derivation used ALQ151 ("ever heavy drinker") only, which (a) silently
+    # dropped never-drinkers (skip pattern), (b) returned NA for the entire 2017-2018 (J)
+    # cycle (variable discontinued), and (c) measured a different construct than the
+    # NHANES-literature standard. The new derivation uses the cycle-harmonized helpers:
+    #   parse_alq_ever()        : lifetime ever-drinker from ALQ101 / ALQ110 / ALQ111
+    #   parse_alq_current_yr()  : drank in past 12 mo from ALQ121 (2013+) or ALQ120Q (1999-2016)
+    # Never-drinkers are now coded as "Never" (instead of NA), and J-cycle participants
+    # get a defined value via ALQ111 + ALQ121.
+    alcohol3 = {
+      ever <- parse_alq_ever(ALQ101, ALQ110, ALQ111)
+      curr <- parse_alq_current_yr(ALQ121, ALQ120Q)
+      case_when(
+        ever == 0 ~ "Never",
+        ever == 1 & curr == 1 ~ "Current",
+        ever == 1 & curr == 0 ~ "Former",
+        TRUE ~ NA_character_
+      )
+    },
+    # Binary alcohol covariate (used by downstream models): "Current drinker" vs.
+    # "Not current drinker" (combines never + former). This matches the NHANES literature
+    # convention and is far less sparse than the previous ALQ151-based binary.
+    alcohol = case_when(
+      alcohol3 == "Current" ~ 1,
+      alcohol3 %in% c("Never", "Former") ~ 0,
+      TRUE ~ NA_real_
+    ),
+    # Physical activity: harmonized across the 2006/2007 GPAQ transition.
+    #   PAQ650 (vigorous recreational, 2007+) OR PAQ665 (moderate recreational, 2007+)
+    #   PAD200 (vigorous past 30 days, 1999-2006) OR PAD320 (moderate past 30 days, 1999-2006)
+    # Either questionnaire format counts as "physically active" for the harmonized binary;
+    # otherwise the participant is asked one set or the other depending on cycle.
     phys_active = case_when(
       parse_yes_no(PAQ650) == 1 | parse_yes_no(PAQ665) == 1 ~ 1,
       parse_yes_no(PAQ650) == 0 & parse_yes_no(PAQ665) == 0 ~ 0,
+      parse_yes_no(PAD200) == 1 | parse_yes_no(PAD320) == 1 ~ 1,
+      parse_yes_no(PAD200) == 0 & parse_yes_no(PAD320) == 0 ~ 0,
       TRUE ~ NA_real_
     ),
+    # Diabetes: DIQ010 ("Doctor told you have diabetes?") codes 1=Yes, 2=No, 3=Borderline,
+    # 7/9=Refused/DK. yesno01() maps 1->1, 2->0, and ALL others (including Borderline) to NA.
+    # This drops borderline-diabetics from the analytic sample. If PI prefers, borderline
+    # can be coded as 1 (any diabetes) or 0 (definite diabetes only).
     diabetes = yesno01(DIQ010),
+    # Hypertension: BPQ020 ("Doctor told you have HBP?") asked of all adults; no gate.
     hypertension = yesno01(BPQ020),
+    # CVD composite: ANY of CHF (MCQ160B), CHD (MCQ160C), heart attack (MCQ160E), stroke
+    # (MCQ160F). Not asked behind a gate; respondent NA in all four -> overall NA.
     cvd = case_when(
       parse_yes_no(MCQ160B) == 1 | parse_yes_no(MCQ160C) == 1 | parse_yes_no(MCQ160E) == 1 | parse_yes_no(MCQ160F) == 1 ~ 1,
       parse_yes_no(MCQ160B) == 0 & parse_yes_no(MCQ160C) == 0 & parse_yes_no(MCQ160E) == 0 & parse_yes_no(MCQ160F) == 0 ~ 0,
@@ -1635,8 +1767,12 @@ build_t1_block <- function(design, data) {
   edu_lths0 <- t1_factor_level_obj("education", "<HS", d0); edu_lths1 <- t1_factor_level_obj("education", "<HS", d1)
   edu_hs0   <- t1_factor_level_obj("education", "HS/GED", d0); edu_hs1   <- t1_factor_level_obj("education", "HS/GED", d1)
   edu_gt0   <- t1_factor_level_obj("education", ">HS", d0); edu_gt1   <- t1_factor_level_obj("education", ">HS", d1)
-  smk0 <- t1_pct_obj(~I(smoker == 1), d0); smk1 <- t1_pct_obj(~I(smoker == 1), d1)
-  alc0 <- t1_pct_obj(~I(alcohol == 1), d0); alc1 <- t1_pct_obj(~I(alcohol == 1), d1)
+  smk_never0 <- t1_factor_level_obj("smoker3", "Never",   d0); smk_never1 <- t1_factor_level_obj("smoker3", "Never",   d1)
+  smk_form0  <- t1_factor_level_obj("smoker3", "Former",  d0); smk_form1  <- t1_factor_level_obj("smoker3", "Former",  d1)
+  smk_curr0  <- t1_factor_level_obj("smoker3", "Current", d0); smk_curr1  <- t1_factor_level_obj("smoker3", "Current", d1)
+  alc_never0 <- t1_factor_level_obj("alcohol3", "Never",   d0); alc_never1 <- t1_factor_level_obj("alcohol3", "Never",   d1)
+  alc_form0  <- t1_factor_level_obj("alcohol3", "Former",  d0); alc_form1  <- t1_factor_level_obj("alcohol3", "Former",  d1)
+  alc_curr0  <- t1_factor_level_obj("alcohol3", "Current", d0); alc_curr1  <- t1_factor_level_obj("alcohol3", "Current", d1)
   pa0  <- t1_pct_obj(~I(phys_active == 1), d0); pa1  <- t1_pct_obj(~I(phys_active == 1), d1)
   dm0  <- t1_pct_obj(~I(diabetes == 1), d0); dm1  <- t1_pct_obj(~I(diabetes == 1), d1)
   htn0 <- t1_pct_obj(~I(hypertension == 1), d0); htn1 <- t1_pct_obj(~I(hypertension == 1), d1)
@@ -1649,7 +1785,9 @@ build_t1_block <- function(design, data) {
       "Non-Hispanic Asian, n (weighted %)", "Other/Multi, n (weighted %)",
       "Education <HS, n (weighted %)", "Education HS/GED, n (weighted %)", "Education >HS, n (weighted %)",
       "PIR, mean (SD)", "BMI, mean (SD)",
-      "Current smoker, n (weighted %)", "Alcohol (yes), n (weighted %)", "Physically active, n (weighted %)",
+      "Never smoker, n (weighted %)", "Former smoker, n (weighted %)", "Current smoker, n (weighted %)",
+      "Never drinker, n (weighted %)", "Former drinker, n (weighted %)", "Current drinker, n (weighted %)",
+      "Physically active, n (weighted %)",
       "Diabetes, n (weighted %)", "Hypertension, n (weighted %)", "CVD history, n (weighted %)"
     ),
     `No CKD` = c(
@@ -1666,8 +1804,12 @@ build_t1_block <- function(design, data) {
       t1_factor_level_n_wpct("education", ">HS", d0, data0),
       t1_mean_sd(~pir, d0),
       t1_mean_sd(~bmi, d0),
-      t1_n_wpct(data0$smoker == 1, ~I(smoker == 1), d0),
-      t1_n_wpct(data0$alcohol == 1, ~I(alcohol == 1), d0),
+      t1_factor_level_n_wpct("smoker3", "Never",   d0, data0),
+      t1_factor_level_n_wpct("smoker3", "Former",  d0, data0),
+      t1_factor_level_n_wpct("smoker3", "Current", d0, data0),
+      t1_factor_level_n_wpct("alcohol3", "Never",   d0, data0),
+      t1_factor_level_n_wpct("alcohol3", "Former",  d0, data0),
+      t1_factor_level_n_wpct("alcohol3", "Current", d0, data0),
       t1_n_wpct(data0$phys_active == 1, ~I(phys_active == 1), d0),
       t1_n_wpct(data0$diabetes == 1, ~I(diabetes == 1), d0),
       t1_n_wpct(data0$hypertension == 1, ~I(hypertension == 1), d0),
@@ -1687,8 +1829,12 @@ build_t1_block <- function(design, data) {
       t1_factor_level_n_wpct("education", ">HS", d1, data1),
       t1_mean_sd(~pir, d1),
       t1_mean_sd(~bmi, d1),
-      t1_n_wpct(data1$smoker == 1, ~I(smoker == 1), d1),
-      t1_n_wpct(data1$alcohol == 1, ~I(alcohol == 1), d1),
+      t1_factor_level_n_wpct("smoker3", "Never",   d1, data1),
+      t1_factor_level_n_wpct("smoker3", "Former",  d1, data1),
+      t1_factor_level_n_wpct("smoker3", "Current", d1, data1),
+      t1_factor_level_n_wpct("alcohol3", "Never",   d1, data1),
+      t1_factor_level_n_wpct("alcohol3", "Former",  d1, data1),
+      t1_factor_level_n_wpct("alcohol3", "Current", d1, data1),
       t1_n_wpct(data1$phys_active == 1, ~I(phys_active == 1), d1),
       t1_n_wpct(data1$diabetes == 1, ~I(diabetes == 1), d1),
       t1_n_wpct(data1$hypertension == 1, ~I(hypertension == 1), d1),
@@ -1708,8 +1854,12 @@ build_t1_block <- function(design, data) {
       fmt_smd(smd_prop(edu_gt0, edu_gt1)),
       fmt_smd(smd_cont(pir0, pir1)),
       fmt_smd(smd_cont(bmi0, bmi1)),
-      fmt_smd(smd_prop(smk0, smk1)),
-      fmt_smd(smd_prop(alc0, alc1)),
+      fmt_smd(smd_prop(smk_never0, smk_never1)),
+      fmt_smd(smd_prop(smk_form0,  smk_form1)),
+      fmt_smd(smd_prop(smk_curr0,  smk_curr1)),
+      fmt_smd(smd_prop(alc_never0, alc_never1)),
+      fmt_smd(smd_prop(alc_form0,  alc_form1)),
+      fmt_smd(smd_prop(alc_curr0,  alc_curr1)),
       fmt_smd(smd_prop(pa0, pa1)),
       fmt_smd(smd_prop(dm0, dm1)),
       fmt_smd(smd_prop(htn0, htn1)),
@@ -2200,7 +2350,9 @@ if (!is.null(fit_int)) {
       geom_vline(xintercept = 0, linetype = "dashed", color = "gray40") +
       geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.18, linewidth = 0.8) +
       geom_point(size = 2.8) +
-      geom_text(aes(label = paste0("p=", format(round(p.value, 3), nsmall = 3))),
+      geom_text(aes(label = ifelse(is.na(p.value), "",
+                                   ifelse(p.value < 0.001, "p<0.001",
+                                          paste0("p=", format(round(p.value, 3), nsmall = 3))))),
                 nudge_y = 0.2, size = 3, color = "black", show.legend = FALSE) +
       scale_color_manual(values = c("No CKD" = "#1b9e77", "CKD" = "#d95f02")) +
       labs(
