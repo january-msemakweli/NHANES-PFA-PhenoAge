@@ -7,14 +7,14 @@ main_labels <- c(
   "Age >= 20\n(N = 44,790)",
   "Non-missing PhenoAge, CKD,\nand Required Modeling Components\n(N = 23,387)",
   "Non-missing Selected Weight,\nPSU, and Strata (Analytic Sample)\n(N = 15,239)",
-  "Complete-Case Modeling Sample\n(qgcomp-Compatible PFAS Subset)\n(N = 3,058)"
+  "Complete-Case Modeling Sample\n(qgcomp-Compatible PFAS Subset)\n(N = 6,819)"
 )
 
 exclusion_labels <- c(
   "Excluded: Age < 20\n(N = 35,522)",
   "Excluded: Missing PhenoAge, CKD,\nor Required Modeling Components\n(N = 21,403)",
   "Excluded: Missing Weight/PSU/Strata\n(N = 8,148)",
-  "Excluded:\nNot in Complete-Case\nModeling Sample\n(N = 12,181)"
+  "Excluded:\nNot in Complete-Case\nModeling Sample\n(N = 8,420)"
 )
 
 top_y <- 20
