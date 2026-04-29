@@ -3,10 +3,10 @@ title: 'Chemical Mixtures and Accelerated Biological Aging in CKD: NHANES Analys
 author: "Reproducible NHANES analysis By January"
 date: "`r format(Sys.Date())`"
 output:
-  pdf_document:
+  word_document:
     toc: true
     toc_depth: '3'
-  word_document:
+  pdf_document:
     toc: true
     toc_depth: '3'
 ---
