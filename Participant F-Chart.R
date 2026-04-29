@@ -3,18 +3,18 @@ library(grid)
 
 # ---- Main vertical boxes (simplified to key analytic steps) ----
 main_labels <- c(
-  "Downloaded NHANES Participants\n(Selected Cycles)\n(N = 80,312)",
-  "Age >= 20\n(N = 44,790)",
+  "Downloaded NHANES Participants\n(Selected Cycles)\n(N = 70,190)",
+  "Age >= 20\n(N = 39,749)",
   "Non-missing PhenoAge, CKD,\nand Required Modeling Components\n(N = 23,387)",
-  "Non-missing Selected Weight,\nPSU, and Strata (Analytic Sample)\n(N = 15,239)",
-  "Complete-Case Modeling Sample\n(qgcomp-Compatible PFAS Subset)\n(N = 6,819)"
+  "Non-missing Selected Weight,\nPSU, and Strata \n(N = 15,239)",
+  "Study Sample\n(Had PFAS measurements recorded)\n(N = 7,633)"
 )
 
 exclusion_labels <- c(
-  "Excluded: Age < 20\n(N = 35,522)",
-  "Excluded: Missing PhenoAge, CKD,\nor Required Modeling Components\n(N = 21,403)",
+  "Excluded: Age < 20\n(N = 30,441)",
+  "Excluded: Missing PhenoAge, CKD,\nor Required Modeling Components\n(N = 16,362)",
   "Excluded: Missing Weight/PSU/Strata\n(N = 8,148)",
-  "Excluded:\nNot in Complete-Case\nModeling Sample\n(N = 8,420)"
+  "Excluded:\nPFAS measurements not recorded\n(N = 7,606)"
 )
 
 top_y <- 20
