@@ -1863,7 +1863,11 @@ fit_qg_ckd1 <- tryCatch(
 ```{r sample-flow}
 n0 <- nrow(nhanes_raw)
 n1 <- sum(dat$age >= config$min_age, na.rm = TRUE)
-n2 <- sum(dat$age >= config$min_age & !is.na(dat$phenoage) & !is.na(dat$ckd), na.rm = TRUE)
+# Split the old "PhenoAge AND CKD non-missing" step into two consecutive exclusions:
+# (a) missing PhenoAge components -> phenoage is NA when any required biomarker is missing;
+# (b) missing CKD modelling components -> ckd is NA when both eGFR and ACR cannot be computed.
+n2a <- sum(dat$age >= config$min_age & !is.na(dat$phenoage), na.rm = TRUE)
+n2b <- sum(dat$age >= config$min_age & !is.na(dat$phenoage) & !is.na(dat$ckd), na.rm = TRUE)
 n3 <- nrow(analytic)
 n4 <- if (exists("qdat")) nrow(qdat) else NA_integer_
 n5 <- if (exists("analytic_qg")) nrow(analytic_qg) else NA_integer_
@@ -1880,7 +1884,8 @@ flow <- tibble(
   step = c(
     "Downloaded NHANES participants (selected cycles)",
     paste0("Age >= ", config$min_age),
-    "Non-missing PhenoAge and CKD",
+    "Non-missing PhenoAge components (all 9 biomarkers required)",
+    "Non-missing CKD modelling components (eGFR or ACR available)",
     "Non-missing selected weight, PSU, and strata (analytic sample)",
     "Primary interaction model sample (fixed 4-PFAS complete-case score + design vars)",
     "Complete-case qgcomp sample",
@@ -1888,7 +1893,7 @@ flow <- tibble(
     "Model B complete-case estimation sample (covariate complete-case)",
     mi_label_step
   ),
-  included = c(n0, n1, n2, n3, n4, n5, n6, n7, n8)
+  included = c(n0, n1, n2a, n2b, n3, n4, n5, n6, n7, n8)
 ) %>%
   mutate(
     excluded_at_step = pmax(lag(included, default = first(included)) - included, 0),
@@ -1921,6 +1926,102 @@ ggplot(flow_plot, aes(x = 1, y = y)) +
     x = NULL, y = NULL
   ) +
   theme_void(base_size = 11)
+```
+
+# PFAS Exposure Distributions
+
+```{r pfas-descriptives}
+# Raw serum PFAS (ng/mL) for the four primary chemicals used in the mixture.
+pfas_raw_map <- c(
+  "PFOS"  = "LBXPFOS",
+  "PFOA"  = "LBXPFOA",
+  "PFNA"  = "LBXPFNA",
+  "PFHxS" = "LBXPFHS"
+)
+pfas_present <- pfas_raw_map[pfas_raw_map %in% names(analytic)]
+
+# Wide -> long for plotting (one panel per chemical) using the analytic sample.
+# Coerce all PFAS columns to numeric first (some NHANES vars arrive as character).
+pfas_wide <- analytic %>%
+  dplyr::select(dplyr::any_of(unname(pfas_present))) %>%
+  dplyr::mutate(dplyr::across(dplyr::everything(), function(x) {
+    suppressWarnings(as.numeric(trimws(as.character(x))))
+  }))
+
+pfas_long <- pfas_wide %>%
+  tidyr::pivot_longer(dplyr::everything(), names_to = "var", values_to = "value") %>%
+  dplyr::filter(!is.na(value), value > 0) %>%
+  dplyr::mutate(chemical = factor(names(pfas_present)[match(var, pfas_present)],
+                                  levels = names(pfas_present)))
+
+# Geometric mean / SD helpers (applied on positive values only)
+gm_mean <- function(x) {
+  x <- x[is.finite(x) & x > 0]
+  if (!length(x)) NA_real_ else exp(mean(log(x)))
+}
+gm_sd <- function(x) {
+  x <- x[is.finite(x) & x > 0]
+  if (length(x) < 2) NA_real_ else exp(stats::sd(log(x)))
+}
+
+pfas_desc <- pfas_long %>%
+  dplyr::group_by(Chemical = chemical) %>%
+  dplyr::summarise(
+    N        = sum(!is.na(value)),
+    Mean     = mean(value, na.rm = TRUE),
+    SD       = stats::sd(value, na.rm = TRUE),
+    Median   = stats::median(value, na.rm = TRUE),
+    Q1       = stats::quantile(value, 0.25, na.rm = TRUE),
+    Q3       = stats::quantile(value, 0.75, na.rm = TRUE),
+    IQR      = Q3 - Q1,
+    Min      = min(value, na.rm = TRUE),
+    Max      = max(value, na.rm = TRUE),
+    GeoMean  = gm_mean(value),
+    GeoSD    = gm_sd(value),
+    .groups  = "drop"
+  ) %>%
+  dplyr::mutate(dplyr::across(c(Mean, SD, Median, Q1, Q3, IQR, Min, Max, GeoMean, GeoSD),
+                              ~ round(.x, 3)))
+
+knitr::kable(
+  pfas_desc,
+  caption = "PFAS descriptive statistics in the analytic sample (serum, ng/mL). Geometric mean / SD computed on positive values only."
+)
+
+# Histogram panels (2x2): export both linear axis (true raw scale) and log10-axis (skewness readability).
+hist_base <- function() {
+  ggplot(pfas_long, aes(x = value)) +
+    geom_histogram(bins = 40, fill = "grey80", color = "black", linewidth = 0.2) +
+    facet_wrap(~ chemical, ncol = 2, scales = "free") +
+    theme_bw(base_size = 10) +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_rect(color = "black", fill = NA, linewidth = 0.4),
+          strip.background = element_blank(),
+          strip.text = element_text(face = "bold"))
+}
+pfas_hist_linear <- hist_base() +
+  labs(x = "Serum concentration (ng/mL)", y = "Count",
+       title = "PFAS distributions (linear x-axis)")
+pfas_hist_log10 <- hist_base() +
+  scale_x_log10() +
+  labs(x = "Serum concentration (ng/mL, log10 axis)", y = "Count",
+       title = "PFAS distributions (log10-scaled axis)")
+
+dir.create("figures", showWarnings = FALSE)
+ggsave("figures/fig0_pfas_distributions_linear.jpg", plot = pfas_hist_linear,
+       width = 8.5, height = 5.5, dpi = 300, device = "jpeg",
+       quality = 95, bg = "white")
+ggsave("figures/fig0_pfas_distributions_log10.jpg", plot = pfas_hist_log10,
+       width = 8.5, height = 5.5, dpi = 300, device = "jpeg",
+       quality = 95, bg = "white")
+# Backwards-compatible alias (linear = raw concentrations)
+file.copy("figures/fig0_pfas_distributions_linear.jpg",
+          "figures/fig0_pfas_distributions.jpg", overwrite = TRUE)
+
+pfas_hist_linear / pfas_hist_log10 +
+  plot_layout(ncol = 1) &
+  theme(plot.title = element_text(face = "bold", size = 11))
 ```
 
 # Tables
